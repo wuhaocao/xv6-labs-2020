@@ -184,6 +184,7 @@ void 		vmprint(pagetable_t pagetable);
 //===================== solution for lab3 pagetable --part2 ===============
 void		kvmfree(pagetable_t pagetalbe);
 void            mod_kvmmap(uint64, uint64, uint64, int, pagetable_t);
+void		mod_freewalk(pagetable_t pagetable);
 //=========================================================================
 
 // plic.c

@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -51,15 +53,19 @@ kvminit()
 void
 mod_kvmmap(uint64 va, uint64 pa, uint64 sz, int perm, pagetable_t pagetable)
 {
-    if(mappages(pagetable, va, sz, pa, perm) != 0)
+    if(mappages(pagetable, va, sz, pa, perm) != 0){	
         panic("mod_kvmmap");
+//	pagetable = 0;
+    }
 }
 
 pagetable_t
 mod_kvminit() {
-    pagetable_t pagetable = (pagetable_t) kalloc();
-    memset(pagetable, 0, PGSIZE);
-
+    pagetable_t pagetable;
+    pagetable = uvmcreate();
+    if(pagetable == 0){
+	return 0;
+    }
     // uart registers
     mod_kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W, pagetable);
 
@@ -73,38 +79,28 @@ mod_kvminit() {
     mod_kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W, pagetable);
 
     // map kernel text executable and read-only.
-    mod_kvmmap(KERNBASE, KERNBASE, (uint64) etext - KERNBASE, PTE_R | PTE_X, pagetable);
+    mod_kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X, pagetable);
 
     // map kernel data and the physical RAM we'll make use of.
-    mod_kvmmap((uint64) etext, (uint64) etext, PHYSTOP - (uint64) etext, PTE_R | PTE_W, pagetable);
+    mod_kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W, pagetable);
 
     // map the trampoline for trap entry/exit to
     // the highest virtual address in the kernel.
-    mod_kvmmap(TRAMPOLINE, (uint64) trampoline, PGSIZE, PTE_R | PTE_X, pagetable);
-
-//      for(int i = 0; i < 512; ++i){
-//              pagetable[i] = kernel_pagetable[i];
-//      }
+    mod_kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X, pagetable);
 
     return pagetable;
 }
 
 void
-kvmfree(pagetable_t pagetable)
-{
-    for(int i = 0; i < 512; i++){
+mod_freewalk(pagetable_t pagetable) {
+    // there are 2^9 = 512 PTEs in a page table.
+    for (int i = 0; i < 512; i++) {
         pte_t pte = pagetable[i];
-        if(pte & PTE_V){
-            pagetable_t level1 = (pagetable_t) PTE2PA(pte);
-            for(int j = 0; j < 512; j++){
-                pte_t pte1 = level1[i];
-                if(pte1 & PTE_V){
-                    uint64 level2 = PTE2PA(pte1);
-                    kfree((void *) level2);
-                    level1[i] = 0;
-                }
-            }
-            kfree((void *) level1);
+        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) { 
+            // this PTE points to a lower-level page table.
+            uint64 child = PTE2PA(pte);
+            mod_freewalk((pagetable_t) child);
+            pagetable[i] = 0;
         }
     }
     kfree((void *) pagetable);
@@ -197,7 +193,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kpagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)

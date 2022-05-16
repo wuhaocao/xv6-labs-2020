@@ -21,6 +21,8 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern pagetable_t kernel_pagetable;
+
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -31,15 +33,15 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
 
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+//      // Allocate a page for the process's kernel stack.
+//      // Map it high in memory, followed by an invalid
+//      // guard page.
+//      char *pa = kalloc();
+//      if(pa == 0)
+//        panic("kalloc");
+//      uint64 va = KSTACK((int) (p - proc));
+//      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+//      p->kstack = va;
   }
   kvminithart();
 }
@@ -89,56 +91,61 @@ allocpid() {
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
-static struct proc*
-allocproc(void)
-{
-  struct proc *p;
+static struct proc *
+allocproc(void) {
+    struct proc *p;
 
-  for(p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
-    if(p->state == UNUSED) {
-      goto found;
-    } else {
-      release(&p->lock);
+    for (p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if (p->state == UNUSED) {
+            goto found;
+        } else {
+            release(&p->lock);
+        }
     }
-  }
-  return 0;
-
-found:
-  p->pid = allocpid();
-
-  // Allocate a trapframe page.
-  if((p->trapframe = (struct trapframe *)kalloc()) == 0){
-    release(&p->lock);
     return 0;
-  }
 
-  // An empty user page table.
-  p->pagetable = proc_pagetable(p);
-  if(p->pagetable == 0){
-    freeproc(p);
-    release(&p->lock);
-    return 0;
-  }
+    found:
+    p->pid = allocpid();
 
-  p->kpagetable = mod_kvminit();
-// ==================== moved function =====================
-//  initlock(&p->lock, "proc");
-  char *pa = kalloc();
-      if(pa == 0)
+    // Allocate a trapframe page.
+    if ((p->trapframe = (struct trapframe *) kalloc()) == 0) {
+        release(&p->lock);
+        return 0;
+    }
+
+    // An empty user page table.
+    p->pagetable = proc_pagetable(p);
+    if (p->pagetable == 0) {
+        freeproc(p);
+        release(&p->lock);
+        return 0;
+    }
+// ========================= solution for lab3 -- part2 ====================
+
+    p->kpagetable = mod_kvminit();
+    if (p->kpagetable == 0) {
+        freeproc(p);
+        release(&p->lock);
+        return 0;
+    }   
+
+    char *pa = kalloc();
+    if (pa == 0)
         panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      mod_kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W, p->kpagetable);
-      p->kstack = va;
-// =========================================================
- 
-  // Set up new context to start executing at forkret,
-  // which returns to user space.
-  memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)forkret;
-  p->context.sp = p->kstack + PGSIZE;
+    uint64 va = KSTACK((int) (p - proc));
+    mod_kvmmap(va, (uint64) pa, PGSIZE, PTE_R | PTE_W, p->kpagetable);
+    p->kstack = va;
 
-  return p;
+// =========================================================================
+
+    // Set up new context to start executing at forkret,
+    // which returns to user space.
+    memset(&p->context, 0, sizeof(p->context));
+    p->context.ra = (uint64) forkret;
+    p->context.sp = p->kstack + PGSIZE;
+
+    return p;
 }
 
 // free a proc structure and the data hanging from it,
@@ -151,8 +158,13 @@ freeproc(struct proc *p)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
 // ================== solution for pgtbl --- part2 ================
+  if(p->kstack) {
+    uvmunmap(p->kpagetable, p->kstack, 1, 1);
+  }
+  p->kstack = 0;
+
   if(p->kpagetable){
-  	kvmfree(p->kpagetable);
+  	mod_freewalk(p->kpagetable);
   }
   p->kpagetable = 0;
 // =================== end of solution for pgtbl =================
@@ -490,13 +502,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
 
 // ================ switch kernel_pagetable ========================
 	w_satp(MAKE_SATP(p->kpagetable));
  	sfence_vma();
 // =================================================================
 
+	swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
